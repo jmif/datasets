@@ -75,7 +75,7 @@ from .features.features import (
     _check_if_features_can_be_aligned,
     generate_from_arrow_type,
     pandas_types_mapper,
-    require_decoding,
+    require_decoding, MultiLabel,
 )
 from .filesystems import extract_path_from_uri, is_remote_filesystem
 from .fingerprint import (
@@ -1864,42 +1864,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
         return dataset._data.column(column).unique().to_pylist()
 
-    def class_encode_column(self, column: str, include_nulls: bool = False) -> "Dataset":
-        """Casts the given column as [`~datasets.features.ClassLabel`] and updates the table.
-
-        Args:
-            column (`str`):
-                The name of the column to cast (list all the column names with [`~datasets.Dataset.column_names`])
-            include_nulls (`bool`, defaults to `False`):
-                Whether to include null values in the class labels. If `True`, the null values will be encoded as the `"None"` class label.
-
-                <Added version="1.14.2"/>
-
-        Example:
-
-        ```py
-        >>> from datasets import load_dataset
-        >>> ds = load_dataset("boolq", split="validation")
-        >>> ds.features
-        {'answer': Value(dtype='bool', id=None),
-         'passage': Value(dtype='string', id=None),
-         'question': Value(dtype='string', id=None)}
-        >>> ds = ds.class_encode_column('answer')
-        >>> ds.features
-        {'answer': ClassLabel(num_classes=2, names=['False', 'True'], id=None),
-         'passage': Value(dtype='string', id=None),
-         'question': Value(dtype='string', id=None)}
-        ```
-        """
-        # Sanity checks
-        if column not in self._data.column_names:
-            raise ValueError(f"Column ({column}) not in table columns ({self._data.column_names}).")
-        src_feat = self._info.features[column]
-        if not isinstance(src_feat, Value):
-            raise ValueError(
-                f"Class encoding is only supported for {Value.__name__} column, and column {column} is {type(src_feat).__name__}."
-            )
-
+    def _class_encode_single_column(self, column: str, src_feat: Value, include_nulls: bool = False) -> "Dataset":
         if src_feat.dtype != "string" or (include_nulls and None in self.unique(column)):
 
             def stringify_column(batch):
@@ -1938,6 +1903,91 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         )
 
         return dset
+
+    def _class_encode_multi_column(self, column: str, src_feat: Sequence, include_nulls: bool = False) -> "Dataset":
+        # TODO need to update unique to look at internal values
+        if src_feat.dtype != "string" or (include_nulls and None in self.unique(column)):
+
+            def stringify_column(batch):
+                batch[column] = [
+                    [str(individual_sample) if include_nulls or individual_sample is not None else None for individual_sample in sample]
+                    for sample in batch[column]
+                ]
+                return batch
+
+            dset = self.map(
+                stringify_column,
+                batched=True,
+                desc="Stringifying the column",
+            )
+        else:
+            dset = self
+
+        # Create the new feature
+        class_names = set([v for value in dset[column] for v in value if include_nulls or v is not None])
+        class_names = sorted(list(class_names))
+        dst_feat = MultiLabel(names=class_names)
+
+        def cast_to_class_labels(batch):
+            batch[column] = [
+                [dst_feat.feature.str2int(str(individual_sample)) if include_nulls or sample is not None else None for individual_sample in sample]
+                for sample in batch[column]
+            ]
+            return batch
+
+        new_features = dset.features.copy()
+        new_features[column] = dst_feat
+
+        dset = dset.map(
+            cast_to_class_labels,
+            batched=True,
+            features=new_features,
+            desc="Casting to class labels",
+        )
+
+        return dset
+
+    def class_encode_column(self, column: str, include_nulls: bool = False) -> "Dataset":
+        """Casts the given column as [`~datasets.features.ClassLabel`] and updates the table.
+
+        Args:
+            column (`str`):
+                The name of the column to cast (list all the column names with [`~datasets.Dataset.column_names`])
+            include_nulls (`bool`, defaults to `False`):
+                Whether to include null values in the class labels. If `True`, the null values will be encoded as the `"None"` class label.
+
+                <Added version="1.14.2"/>
+
+        Example:
+
+        ```py
+        >>> from datasets import load_dataset
+        >>> ds = load_dataset("boolq", split="validation")
+        >>> ds.features
+        {'answer': Value(dtype='bool', id=None),
+         'passage': Value(dtype='string', id=None),
+         'question': Value(dtype='string', id=None)}
+        >>> ds = ds.class_encode_column('answer')
+        >>> ds.features
+        {'answer': ClassLabel(num_classes=2, names=['False', 'True'], id=None),
+         'passage': Value(dtype='string', id=None),
+         'question': Value(dtype='string', id=None)}
+        ```
+        """
+        # Sanity checks
+        if column not in self._data.column_names:
+            raise ValueError(f"Column ({column}) not in table columns ({self._data.column_names}).")
+
+        src_feat = self._info.features[column]
+        if isinstance(src_feat, Value):
+            return self._class_encode_single_column(column, src_feat, include_nulls)
+        elif isinstance(src_feat, Sequence):
+            return self._class_encode_multi_column(column, src_feat, include_nulls)
+        else:
+            raise ValueError(
+                f"Class encoding is only supported for {Value.__name__} column, and column {column} is {type(src_feat).__name__}."
+            )
+
 
     @fingerprint_transform(inplace=False)
     def flatten(self, new_fingerprint: Optional[str] = None, max_depth=16) -> "Dataset":

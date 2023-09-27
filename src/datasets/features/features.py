@@ -1141,12 +1141,20 @@ class Sequence:
     _type: str = field(default="Sequence", init=False, repr=False)
 
 
+@dataclass
+class MultiLabel(Sequence):
+    def __init__(self, num_classes=None, names=None, names_file=None, length=-1, id=None):
+        class_label_feature = ClassLabel(num_classes=num_classes, names=names, names_file=names_file)
+        super().__init__(feature=class_label_feature, length=length, id=id)
+
+
 FeatureType = Union[
     dict,
     list,
     tuple,
     Value,
     ClassLabel,
+    MultiLabel,
     Translation,
     TranslationVariableLanguages,
     Sequence,
